@@ -12,7 +12,7 @@ const requireUser = async (ctx: QueryCtx | MutationCtx, token: string) => {
 const visibleTo = (idea: Doc<"ideas">, user: Doc<"users">) =>
   idea.personKeys.includes("everyone") || !idea.personKeys.includes(user.personId);
 
-const presentIdea = async (ctx: QueryCtx, idea: Doc<"ideas">) => {
+const presentIdea = async (ctx: QueryCtx, idea: Doc<"ideas">, shortlistRank?: number) => {
   const author = await ctx.db.get("users", idea.authorId);
   return {
     id: idea._id,
@@ -20,6 +20,7 @@ const presentIdea = async (ctx: QueryCtx, idea: Doc<"ideas">) => {
     people: idea.personKeys,
     author: author?.displayName ?? "Unknown",
     shortlisted: idea.shortlisted,
+    shortlistRank,
   };
 };
 
@@ -72,7 +73,14 @@ export const state = query({
     const settings = await ctx.db.query("settings").withIndex("by_key", q => q.eq("key", "main")).unique();
     const people = await ctx.db.query("people").take(100);
     const allIdeas = await ctx.db.query("ideas").order("desc").take(250);
-    const ideas = await Promise.all(allIdeas.filter(idea => visibleTo(idea, user)).map(idea => presentIdea(ctx, idea)));
+    const ballots = await ctx.db.query("ballots").take(250);
+    const scores = new Map<string, number>();
+    ballots.forEach(candidate => candidate.rankedIdeaIds.forEach((id, rank) => scores.set(id, (scores.get(id) ?? 0) + Math.max(1, 250 - rank))));
+    const shortlistRanks = new Map(allIdeas
+      .filter(idea => idea.shortlisted)
+      .sort((a, b) => (scores.get(b._id) ?? 0) - (scores.get(a._id) ?? 0) || a.createdAt - b.createdAt)
+      .map((idea, rank) => [idea._id, rank + 1]));
+    const ideas = await Promise.all(allIdeas.filter(idea => visibleTo(idea, user)).map(idea => presentIdea(ctx, idea, shortlistRanks.get(idea._id))));
     const ballot = await ctx.db.query("ballots").withIndex("by_user", q => q.eq("userId", user._id)).unique();
     const card = await ctx.db.query("cards").withIndex("by_user", q => q.eq("userId", user._id)).unique();
     const allChecks = await ctx.db.query("checks").withIndex("by_user", q => q.eq("userId", user._id)).take(100);
@@ -80,18 +88,17 @@ export const state = query({
     const users = await ctx.db.query("users").take(100);
     const cards = await ctx.db.query("cards").take(100);
     const sharedChecks = await ctx.db.query("checks").take(500);
-    const otherCards = cards.flatMap(otherCard => {
-      if (otherCard.userId === user._id) return [];
-      const owner = users.find(candidate => candidate._id === otherCard.userId);
+    const otherCards = users.flatMap(owner => {
+      if (owner._id === user._id) return [];
+      const otherCard = cards.find(candidate => candidate.userId === owner._id);
       const person = people.find(candidate => candidate.key === owner?.personId);
-      if (!owner) return [];
       const completed = new Set(sharedChecks.filter(check => check.userId === owner._id).map(check => check.ideaId));
       return [{
         userId: owner._id,
         name: owner.displayName,
         color: person?.color ?? "#777777",
         icon: owner.icon ?? owner.displayName.slice(0, 1),
-        completed: otherCard.ideaIds.map(ideaId => completed.has(ideaId)),
+        completed: otherCard?.ideaIds.map(ideaId => completed.has(ideaId)) ?? Array.from({ length: 24 }, () => false),
       }];
     });
     const overlaps = card ? card.ideaIds.map(ideaId => ({

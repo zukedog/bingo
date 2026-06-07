@@ -6,7 +6,7 @@ import { ArrowRight, Bell, CalendarClock, Check, Clock3, Eye, GripVertical, Ligh
 
 type Phase = "ideas" | "voting" | "shortlist" | "playing";
 type Person = { id: string; name: string; color: string };
-type Idea = { id: Id<"ideas">; text: string; people: string[]; author: string; shortlisted: boolean };
+type Idea = { id: Id<"ideas">; text: string; people: string[]; author: string; shortlisted: boolean; shortlistRank?: number };
 type LoginResult = { token: string; displayName: string; personId: string; mustChangePassword: boolean };
 type SharedCard = { userId: Id<"users">; name: string; color: string; icon: string; completed: boolean[] };
 type Overlap = { ideaId: Id<"ideas">; users: { name: string; color: string; icon: string }[] };
@@ -93,7 +93,7 @@ function ShortlistPhase({ ideas, people, initial, onDone }: { ideas: Idea[]; peo
   const [chosen, setChosen] = useState<Id<"ideas">[]>(initial); useEffect(() => setChosen(initial), [initial]);
   const toggle = (id: Id<"ideas">) => setChosen(c => c.includes(id) ? c.filter(x => x !== id) : c.length < 24 ? [...c, id] : c);
   return <section className="shortlist"><div className="selection-bar"><div><strong>{chosen.length}<span>/24</span></strong><p>{chosen.length === 24 ? "Your card is ready to go." : `${24 - chosen.length} spaces will be filled randomly.`}</p></div><div className="progress"><i style={{ width: `${chosen.length / 24 * 100}%` }} /></div><button className="primary small" onClick={() => onDone(chosen)}>Make my card <ArrowRight size={16} /></button></div>
-    <div className="short-grid">{ideas.map((idea, i) => <button onClick={() => toggle(idea.id)} className={chosen.includes(idea.id) ? "chosen" : ""} key={idea.id}><span className="pick-check"><Check size={14} /></span><em>#{i + 1} pick</em><h4>{idea.text}</h4><Tag id={idea.people[0]} people={people} /></button>)}</div>
+    <div className="short-grid">{ideas.map((idea, i) => <button onClick={() => toggle(idea.id)} className={chosen.includes(idea.id) ? "chosen" : ""} key={idea.id}><span className="pick-check"><Check size={14} /></span><em>#{idea.shortlistRank ?? i + 1} pick</em><h4>{idea.text}</h4><Tag id={idea.people[0]} people={people} /></button>)}</div>
   </section>;
 }
 
@@ -217,7 +217,7 @@ export default function App() {
   if (!token) return <Login onLogin={result => { localStorage.setItem("bingo-token", result.token); setToken(result.token); }} />;
   if (state === undefined || state === null) return <main className="login-shell"><section className="login-panel"><div className="login-form"><span className="kicker dark">Connecting</span><h2>Loading your game…</h2></div></section></main>;
   const phase = state.settings ? phaseAt(state.settings, clock) : "ideas"; const people = state.people.length ? state.people : fallbackPeople;
-  const ideas = state.ideas as Idea[]; const shortlist = ideas.filter(idea => idea.shortlisted).slice(0, 50);
+  const ideas = state.ideas as Idea[]; const shortlist = ideas.filter(idea => idea.shortlisted).sort((a, b) => (a.shortlistRank ?? 51) - (b.shortlistRank ?? 51)).slice(0, 50);
   const changePhase = async (next: Phase) => setPhase({ token, phase: next });
   const signOut = async () => { await logout({ token }); localStorage.removeItem("bingo-token"); setToken(""); };
   const latestWin = state.leaderboard[state.leaderboard.length - 1];

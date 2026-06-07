@@ -10,17 +10,24 @@ const requireAdmin = async (ctx: MutationCtx, token: string) => {
   return user;
 };
 
+const recalculateShortlist = async (ctx: MutationCtx) => {
+  const ballots = await ctx.db.query("ballots").take(250);
+  const scores = new Map<string, number>();
+  ballots.forEach(ballot => ballot.rankedIdeaIds.forEach((id, rank) => scores.set(id, (scores.get(id) ?? 0) + Math.max(1, 250 - rank))));
+  const ideas = await ctx.db.query("ideas").take(250);
+  const topIds = new Set(ideas
+    .sort((a, b) => (scores.get(b._id) ?? 0) - (scores.get(a._id) ?? 0) || a.createdAt - b.createdAt)
+    .slice(0, 50)
+    .map(idea => idea._id));
+  await Promise.all(ideas.map(idea => ctx.db.patch(idea._id, { shortlisted: topIds.has(idea._id) })));
+};
+
 const applyPhase = async (ctx: MutationCtx, phase: "ideas" | "voting" | "shortlist" | "playing") => {
   const settings = await ctx.db.query("settings").withIndex("by_key", q => q.eq("key", "main")).unique();
   if (!settings) throw new Error("Game settings are missing");
   await ctx.db.patch(settings._id, { phase });
   if (phase === "shortlist") {
-    const ballots = await ctx.db.query("ballots").take(250);
-    const scores = new Map<string, number>();
-    ballots.forEach(ballot => ballot.rankedIdeaIds.forEach((id, rank) => scores.set(id, (scores.get(id) ?? 0) + Math.max(1, 50 - rank))));
-    const ideas = await ctx.db.query("ideas").take(250);
-    const topIds = new Set(ideas.sort((a, b) => (scores.get(b._id) ?? 0) - (scores.get(a._id) ?? 0)).slice(0, 50).map(idea => idea._id));
-    await Promise.all(ideas.map(idea => ctx.db.patch(idea._id, { shortlisted: topIds.has(idea._id) })));
+    await recalculateShortlist(ctx);
   }
   if (phase === "playing") {
     const users = await ctx.db.query("users").take(100);
@@ -39,6 +46,11 @@ const applyPhase = async (ctx: MutationCtx, phase: "ideas" | "voting" | "shortli
     }
   }
 };
+
+export const refreshShortlist = internalMutation({
+  args: {},
+  handler: recalculateShortlist,
+});
 
 export const setPhase = mutation({
   args: {
