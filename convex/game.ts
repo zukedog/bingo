@@ -2,6 +2,7 @@ import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/s
 import type { Doc, Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 import { hashPassword, verifyPassword } from "./passwords";
+import { buildCardIdeaIds, ensureCard, hasBingo } from "./cards";
 
 const requireUser = async (ctx: QueryCtx | MutationCtx, token: string) => {
   const user = await ctx.db.query("users").withIndex("by_token", q => q.eq("sessionToken", token)).unique();
@@ -31,16 +32,6 @@ const scheduledPhase = (settings: Doc<"settings"> | null) => {
   if (settings.shortlistStartsAt && now >= settings.shortlistStartsAt) return "shortlist" as const;
   if (settings.votingStartsAt && now >= settings.votingStartsAt) return "voting" as const;
   return settings.phase;
-};
-
-const hasBingo = (ideaIds: Id<"ideas">[], completed: Set<Id<"ideas">>) => {
-  const marked = Array.from({ length: 25 }, (_, index) => index === 12 || completed.has(ideaIds[index > 12 ? index - 1 : index]));
-  const lines = [
-    ...Array.from({ length: 5 }, (_, row) => Array.from({ length: 5 }, (_, col) => row * 5 + col)),
-    ...Array.from({ length: 5 }, (_, col) => Array.from({ length: 5 }, (_, row) => row * 5 + col)),
-    [0, 6, 12, 18, 24], [4, 8, 12, 16, 20],
-  ];
-  return lines.some(line => line.every(index => marked[index]));
 };
 
 export const login = mutation({
@@ -196,19 +187,8 @@ export const saveCard = mutation({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx, args.token);
     if (args.ideaIds.length > 24) throw new Error("Choose no more than 24 items");
-    const shortlist = await ctx.db.query("ideas").take(250);
-    const available = shortlist.filter(idea => idea.shortlisted && visibleTo(idea, user) && !args.ideaIds.includes(idea._id));
-    const fill = available
-      .map(idea => ({ ideaId: idea._id, order: crypto.randomUUID() }))
-      .sort((a, b) => a.order.localeCompare(b.order))
-      .slice(0, 24 - args.ideaIds.length)
-      .map(item => item.ideaId);
-    const completed = [...new Set([...args.ideaIds, ...fill])];
-    if (completed.length < 24) throw new Error("There are not enough visible shortlisted ideas to build a card");
-    const shuffled = completed
-      .map(ideaId => ({ ideaId, order: crypto.randomUUID() }))
-      .sort((a, b) => a.order.localeCompare(b.order))
-      .map(item => item.ideaId);
+    const shuffled = await buildCardIdeaIds(ctx, user, args.ideaIds);
+    if (!shuffled) throw new Error("There are no visible shortlisted ideas to build a card");
     const existing = await ctx.db.query("cards").withIndex("by_user", q => q.eq("userId", user._id)).unique();
     if (existing) await ctx.db.patch(existing._id, { ideaIds: shuffled });
     else await ctx.db.insert("cards", { userId: user._id, ideaIds: shuffled, createdAt: Date.now() });
@@ -225,7 +205,7 @@ export const toggleCheck = mutation({
     else if (existing) await ctx.db.patch(existing._id, { comment: args.comment, checkedAt: Date.now() });
     else if (args.checked) await ctx.db.insert("checks", { userId: user._id, ideaId: args.ideaId, comment: args.comment, checkedAt: Date.now() });
     if (args.checked) {
-      const card = await ctx.db.query("cards").withIndex("by_user", q => q.eq("userId", user._id)).unique();
+      const card = await ensureCard(ctx, user, [args.ideaId]);
       const win = await ctx.db.query("wins").withIndex("by_user", q => q.eq("userId", user._id)).unique();
       if (card && !win) {
         const checks = await ctx.db.query("checks").withIndex("by_user", q => q.eq("userId", user._id)).take(100);

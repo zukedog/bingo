@@ -2,6 +2,7 @@ import { internalMutation, mutation, type MutationCtx } from "./_generated/serve
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { hashPassword } from "./passwords";
+import { ensureCard, hasBingo } from "./cards";
 
 const requireAdmin = async (ctx: MutationCtx, token: string) => {
   const user = await ctx.db.query("users").withIndex("by_token", q => q.eq("sessionToken", token)).unique();
@@ -31,18 +32,8 @@ const applyPhase = async (ctx: MutationCtx, phase: "ideas" | "voting" | "shortli
   }
   if (phase === "playing") {
     const users = await ctx.db.query("users").take(100);
-    const ideas = await ctx.db.query("ideas").take(250);
-    const cards = await ctx.db.query("cards").take(100);
     for (const user of users) {
-      const existing = cards.find(card => card.userId === user._id);
-      const currentIds = existing?.ideaIds ?? [];
-      const available = ideas.filter(idea => idea.shortlisted && (idea.personKeys.includes("everyone") || !idea.personKeys.includes(user.personId)) && !currentIds.includes(idea._id));
-      const fill = available.map(idea => ({ ideaId: idea._id, order: crypto.randomUUID() })).sort((a, b) => a.order.localeCompare(b.order)).slice(0, 24 - currentIds.length).map(item => item.ideaId);
-      const completed = [...currentIds, ...fill].slice(0, 24).map(ideaId => ({ ideaId, order: crypto.randomUUID() })).sort((a, b) => a.order.localeCompare(b.order)).map(item => item.ideaId);
-      if (completed.length === 24) {
-        if (existing) await ctx.db.patch(existing._id, { ideaIds: completed });
-        else await ctx.db.insert("cards", { userId: user._id, ideaIds: completed, createdAt: Date.now() });
-      }
+      await ensureCard(ctx, user);
     }
   }
 };
@@ -50,6 +41,30 @@ const applyPhase = async (ctx: MutationCtx, phase: "ideas" | "voting" | "shortli
 export const refreshShortlist = internalMutation({
   args: {},
   handler: recalculateShortlist,
+});
+
+export const repairProductionCardsAndWins = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const users = await ctx.db.query("users").take(100);
+    let cardsCreatedOrFilled = 0;
+    let winsAdded = 0;
+    for (const user of users) {
+      const before = await ctx.db.query("cards").withIndex("by_user", q => q.eq("userId", user._id)).unique();
+      const checks = await ctx.db.query("checks").withIndex("by_user", q => q.eq("userId", user._id)).take(100);
+      const card = await ensureCard(ctx, user, checks.map(check => check.ideaId));
+      if (card?.ideaIds.length && (!before || before.ideaIds.length < card.ideaIds.length)) cardsCreatedOrFilled += 1;
+      const win = await ctx.db.query("wins").withIndex("by_user", q => q.eq("userId", user._id)).unique();
+      if (!win && card?.ideaIds.length) {
+        const completed = new Set(checks.map(check => check.ideaId));
+        if (hasBingo(card.ideaIds, completed)) {
+          await ctx.db.insert("wins", { userId: user._id, wonAt: Date.now() });
+          winsAdded += 1;
+        }
+      }
+    }
+    return { cardsCreatedOrFilled, winsAdded };
+  },
 });
 
 export const setPhase = mutation({
